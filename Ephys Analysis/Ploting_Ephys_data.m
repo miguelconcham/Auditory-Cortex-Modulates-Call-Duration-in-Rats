@@ -2163,6 +2163,22 @@ for j=1:size(matrix2svm,1)
     matrix2svm_sm(j,1:end-1) = movmean(matrix2svm_sm(j,1:end-1),2);
 end
 
+%% train Gaussian-kernel SVM (paper methods: 90/10 hold-out)
+% Features: onset-suppressed population rate in the 100–250 ms predicting
+% interval. Last column of matrix2svm_sm is the label
+% (0 = another call follows, 1 = the sequence ends).
+rng(1)
+X_svm = matrix2svm_sm(:, 1:end-1);
+Y_svm = matrix2svm_sm(:, end);
+cvp_svm = cvpartition(Y_svm, 'HoldOut', 0.10);
+svm_model = fitcsvm(X_svm(training(cvp_svm), :), Y_svm(training(cvp_svm)), ...
+    'KernelFunction', 'gaussian', ...
+    'Standardize', true);
+Y_svm_hat = predict(svm_model, X_svm(test(cvp_svm), :));
+figure
+confusionchart(Y_svm(test(cvp_svm)), Y_svm_hat)
+title('SVM call occurrence (this session, 90/10 hold-out)')
+
 %% ploitng svm summary 
 
 svm_summary = [70.3	29.7	92.4	7.6;

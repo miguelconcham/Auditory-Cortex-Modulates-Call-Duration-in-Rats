@@ -49,9 +49,17 @@ Required MathWorks products:
 | Product | Used for |
 | --- | --- |
 | MATLAB | PSTHs, figures, table I/O |
-| Statistics and Machine Learning Toolbox | SVM classification (`fitcsvm`, Gaussian/RBF kernel), mixed-effects models (`fitlme`), linear models (`fitlm`), ANOVA (`anovan`), `ttest`, `signrank`, `kstest`, Spearman/Pearson `corr` |
+| Statistics and Machine Learning Toolbox | **SVM** (`fitcsvm`, Gaussian kernel), mixed-effects models (`fitlme`), linear models (`fitlm`), hold-out splits (`cvpartition`), ANOVA (`anovan`), `ttest`, `signrank`, `kstest`, Spearman/Pearson `corr` |
 
-The paper’s call-occurrence analysis used MATLAB R2023b classification functions from this toolbox (not a separate product). Confirm the toolbox is installed with `ver` or `license('test', 'Statistics_Toolbox')`.
+Install the toolbox before running the ephys scripts. Check with:
+
+```matlab
+ver                                  % list installed products
+license('test', 'Statistics_Toolbox') % 1 if the ML toolbox license is available
+which fitcsvm                        % path to the SVM trainer
+```
+
+The paper’s call-occurrence decoder used these classification functions (MATLAB R2023b “classification toolbox”), not a separate product.
 
 Place helper functions that the scripts call on the MATLAB path before running:
 
@@ -61,6 +69,47 @@ Place helper functions that the scripts call on the MATLAB path before running:
 | `assign_depth` | same |
 | `CallCount` | `Behavior_Analysis_main_figure.m` |
 | `match_lengths` | `Ploting_Ephys_data.m` (duration-matched SVM training sets) |
+
+## Machine learning tools
+
+These are the machine-learning methods used in the paper. SVM is the decoder for **whether another call is coming** (Fig. 2F–G).
+
+| Tool | MATLAB / package | Where | Role |
+| --- | --- | --- | --- |
+| **Support vector machine (SVM)** | `fitcsvm` (`KernelFunction`, `'gaussian'`), `predict`, `cvpartition` | `Ephys Analysis/Ploting_Ephys_data.m` | Classify call vs no-call from onset-suppressed population rate in the 100–250 ms window after call offset (90% train / 10% test) |
+| Linear mixed-effects models | `fitlme` | `Ephys Analysis/Mixed_model_correlation_lenght_firing_rate.m` | `rate ~ CallLength + (1\|Ds)` so session is a random intercept (Fig. 2D) |
+| Ordinary linear models | `fitlm` | ephys and behavior scripts | Rate–duration regressions and noise-latency fits |
+| Iterative z-score classification | custom | `Ephys Analysis/Neuron_classification.m` | Separate pre-call, onset, ramping, and non-responsive cortical units (Supplementary Fig. 1) |
+| [Kilosort 2.0](https://github.com/MouseLand/Kilosort) + [Phy](https://github.com/cortex-lab/phy) | Python / MATLAB (preprocessing) | not in this repo | Spike detection and manual cluster curation |
+| [DeepSqueak](https://github.com/DrCoffey/DeepSqueak) v3 | MATLAB CNN | not in this repo | Ultrasonic call detection and call-feature extraction |
+
+### SVM for call occurrence (Fig. 2F–G)
+
+`Ploting_Ephys_data.m` builds the feature matrix, then trains a Gaussian-kernel SVM:
+
+1. Keep calls with an inter-call interval ≥ 250 ms so a stimulation-free predicting window exists.
+2. Match the duration distributions of calls that are versus are not followed by another call (`match_lengths` + two-sample Kolmogorov–Smirnov test).
+3. Bin onset-suppressed population spikes in the predicting interval (100–250 ms after offset; 20 ms bins in the paper).
+4. Smooth bin counts with a 2-bin moving average (`matrix2svm_sm`).
+5. Train `fitcsvm` on a 90 / 10% hold-out split (`cvpartition`).
+
+Columns of `matrix2svm_sm` are the binned rates; the last column is the label (`0` = another call follows, `1` = the sequence ends). The training step in the script is:
+
+```matlab
+rng(1)
+X = matrix2svm_sm(:, 1:end-1);
+Y = matrix2svm_sm(:, end);
+cvp = cvpartition(Y, 'HoldOut', 0.10);
+
+svm_model = fitcsvm(X(training(cvp), :), Y(training(cvp)), ...
+    'KernelFunction', 'gaussian', ...
+    'Standardize', true);
+
+yhat = predict(svm_model, X(test(cvp), :));
+confusionchart(Y(test(cvp)), yhat)
+```
+
+True-positive, false-negative, true-negative, and false-positive rates for the three animals in Fig. 2G are stored as `svm_summary` in the same script (rows = animals; columns = TP, FN, TN, FP in percent). The live `fitcsvm` block retrains on the current session’s matrix; those session-level scores need not match the published three-animal `svm_summary`.
 
 ## Data
 
@@ -99,7 +148,7 @@ Fig. 3 / Supplementary Fig. 5 source tables: Supplementary Data 1 on the [publis
 
 ## How to run
 
-1. Install MATLAB (R2023b or later) with the Statistics and Machine Learning Toolbox.
+1. Install MATLAB (R2023b or later) with the Statistics and Machine Learning Toolbox (needed for `fitcsvm`, `fitlme`, and `fitlm`).
 2. Put the data files listed above next to the script that loads them.
 3. Add any helper functions (`assignBrainArea`, `assign_depth`, `CallCount`, `match_lengths`) to the MATLAB path.
 4. `cd` into the analysis folder, then run the script.
@@ -127,45 +176,6 @@ behavior_data = '\\experimentfs.bccn-berlin.pri\...\Behavior Analysis';
 ```
 
 Point `behavior_data` at the local folder that contains the Spike2 stim file (`mc250207_3 exp3`) before running. Excel tables and `synch_model_spike2audio.mat` are still loaded from the current working directory.
-
-## Machine learning and statistics
-
-The paper used MATLAB’s Statistics and Machine Learning Toolbox (including its classification functions) together with two external tools for spike sorting and call detection.
-
-| Tool | Where | Role |
-| --- | --- | --- |
-| Support vector machine (`fitcsvm`, Gaussian kernel) | `Ploting_Ephys_data.m` → Fig. 2F–G | Predict whether another call follows from onset-suppressed population rate in the 100–250 ms window after call offset |
-| Linear mixed-effects models (`fitlme`) | `Mixed_model_correlation_lenght_firing_rate.m` → Fig. 2D | `rate ~ CallLength + (1\|Ds)` so session identity is a random intercept |
-| Ordinary linear models (`fitlm`) | ephys and behavior scripts | Rate–duration regressions and noise-latency fits |
-| Iterative z-score classification | `Neuron_classification.m`, Supplementary Fig. 1 | Separate pre-call, onset, ramping, and non-responsive cortical units |
-| [Kilosort 2.0](https://github.com/MouseLand/Kilosort) + [Phy](https://github.com/cortex-lab/phy) | preprocessing (not in this repo) | Spike detection and manual cluster curation |
-| [DeepSqueak](https://github.com/DrCoffey/DeepSqueak) v3 | preprocessing (not in this repo) | CNN-based ultrasonic call detection and call-feature extraction |
-
-### SVM for call occurrence (Fig. 2F–G)
-
-`Ploting_Ephys_data.m` builds the feature matrix in the sections `creating matrix for svm` and `creating matrix for svm prediction selecting right interval`:
-
-1. Keep calls with an inter-call interval ≥ 250 ms so a stimulation-free predicting window exists.
-2. Match the duration distributions of calls that are versus are not followed by another call (`match_lengths` + two-sample Kolmogorov–Smirnov test).
-3. Bin onset-suppressed population spikes in the predicting interval (100–250 ms after offset, 20 ms bins in the paper).
-4. Smooth bin counts with a 2-bin moving average (`matrix2svm_sm`).
-
-Columns of `matrix2svm_sm` are the binned rates; the last column is the label (`0` = another call follows, `1` = the sequence ends). The paper trained a Gaussian-kernel SVM on a 90 / 10% train–test split. After those sections have run:
-
-```matlab
-X = matrix2svm_sm(:, 1:end-1);
-Y = matrix2svm_sm(:, end);
-cvp = cvpartition(Y, 'HoldOut', 0.10);
-
-svm_model = fitcsvm(X(training(cvp), :), Y(training(cvp)), ...
-    'KernelFunction', 'gaussian', ...
-    'Standardize', true);
-
-yhat = predict(svm_model, X(test(cvp), :));
-confusionchart(Y(test(cvp)), yhat)
-```
-
-True-positive, false-negative, true-negative, and false-positive rates for the three animals in Fig. 2G are stored as `svm_summary` in the same script (rows = animals; columns = TP, FN, TN, FP in percent).
 
 ## Script-to-figure map
 
