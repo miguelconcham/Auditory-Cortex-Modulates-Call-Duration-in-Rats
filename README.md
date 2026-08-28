@@ -49,7 +49,9 @@ Required MathWorks products:
 | Product | Used for |
 | --- | --- |
 | MATLAB | PSTHs, figures, table I/O |
-| Statistics and Machine Learning Toolbox | `fitlm`, `fitlme`, `anovan`, `ttest`, `signrank`, `kstest`, Spearman/Pearson `corr` |
+| Statistics and Machine Learning Toolbox | SVM classification (`fitcsvm`, Gaussian/RBF kernel), mixed-effects models (`fitlme`), linear models (`fitlm`), ANOVA (`anovan`), `ttest`, `signrank`, `kstest`, Spearman/Pearson `corr` |
+
+The paper’s call-occurrence analysis used MATLAB R2023b classification functions from this toolbox (not a separate product). Confirm the toolbox is installed with `ver` or `license('test', 'Statistics_Toolbox')`.
 
 Place helper functions that the scripts call on the MATLAB path before running:
 
@@ -58,6 +60,7 @@ Place helper functions that the scripts call on the MATLAB path before running:
 | `assignBrainArea` | `Neuron_classification.m`, `Ploting_Ephys_data.m` |
 | `assign_depth` | same |
 | `CallCount` | `Behavior_Analysis_main_figure.m` |
+| `match_lengths` | `Ploting_Ephys_data.m` (duration-matched SVM training sets) |
 
 ## Data
 
@@ -98,7 +101,7 @@ Fig. 3 / Supplementary Fig. 5 source tables: Supplementary Data 1 on the [publis
 
 1. Install MATLAB (R2023b or later) with the Statistics and Machine Learning Toolbox.
 2. Put the data files listed above next to the script that loads them.
-3. Add any helper functions (`assignBrainArea`, `assign_depth`, `CallCount`) to the MATLAB path.
+3. Add any helper functions (`assignBrainArea`, `assign_depth`, `CallCount`, `match_lengths`) to the MATLAB path.
 4. `cd` into the analysis folder, then run the script.
 
 ```matlab
@@ -125,13 +128,52 @@ behavior_data = '\\experimentfs.bccn-berlin.pri\...\Behavior Analysis';
 
 Point `behavior_data` at the local folder that contains the Spike2 stim file (`mc250207_3 exp3`) before running. Excel tables and `synch_model_spike2audio.mat` are still loaded from the current working directory.
 
+## Machine learning and statistics
+
+The paper used MATLAB’s Statistics and Machine Learning Toolbox (including its classification functions) together with two external tools for spike sorting and call detection.
+
+| Tool | Where | Role |
+| --- | --- | --- |
+| Support vector machine (`fitcsvm`, Gaussian kernel) | `Ploting_Ephys_data.m` → Fig. 2F–G | Predict whether another call follows from onset-suppressed population rate in the 100–250 ms window after call offset |
+| Linear mixed-effects models (`fitlme`) | `Mixed_model_correlation_lenght_firing_rate.m` → Fig. 2D | `rate ~ CallLength + (1\|Ds)` so session identity is a random intercept |
+| Ordinary linear models (`fitlm`) | ephys and behavior scripts | Rate–duration regressions and noise-latency fits |
+| Iterative z-score classification | `Neuron_classification.m`, Supplementary Fig. 1 | Separate pre-call, onset, ramping, and non-responsive cortical units |
+| [Kilosort 2.0](https://github.com/MouseLand/Kilosort) + [Phy](https://github.com/cortex-lab/phy) | preprocessing (not in this repo) | Spike detection and manual cluster curation |
+| [DeepSqueak](https://github.com/DrCoffey/DeepSqueak) v3 | preprocessing (not in this repo) | CNN-based ultrasonic call detection and call-feature extraction |
+
+### SVM for call occurrence (Fig. 2F–G)
+
+`Ploting_Ephys_data.m` builds the feature matrix in the sections `creating matrix for svm` and `creating matrix for svm prediction selecting right interval`:
+
+1. Keep calls with an inter-call interval ≥ 250 ms so a stimulation-free predicting window exists.
+2. Match the duration distributions of calls that are versus are not followed by another call (`match_lengths` + two-sample Kolmogorov–Smirnov test).
+3. Bin onset-suppressed population spikes in the predicting interval (100–250 ms after offset, 20 ms bins in the paper).
+4. Smooth bin counts with a 2-bin moving average (`matrix2svm_sm`).
+
+Columns of `matrix2svm_sm` are the binned rates; the last column is the label (`0` = another call follows, `1` = the sequence ends). The paper trained a Gaussian-kernel SVM on a 90 / 10% train–test split. After those sections have run:
+
+```matlab
+X = matrix2svm_sm(:, 1:end-1);
+Y = matrix2svm_sm(:, end);
+cvp = cvpartition(Y, 'HoldOut', 0.10);
+
+svm_model = fitcsvm(X(training(cvp), :), Y(training(cvp)), ...
+    'KernelFunction', 'gaussian', ...
+    'Standardize', true);
+
+yhat = predict(svm_model, X(test(cvp), :));
+confusionchart(Y(test(cvp)), yhat)
+```
+
+True-positive, false-negative, true-negative, and false-positive rates for the three animals in Fig. 2G are stored as `svm_summary` in the same script (rows = animals; columns = TP, FN, TN, FP in percent).
+
 ## Script-to-figure map
 
 | Paper figure | Script | What it does |
 | --- | --- | --- |
 | Fig. 1, Supplementary Figs. 1–2 | `Ephys Analysis/Ploting_Ephys_data.m` | Onset/offset PSTHs for call and playback, call−playback difference, example neurons, depth distributions |
 | Supplementary Fig. 1 (classification) | `Ephys Analysis/Neuron_classification.m` | Iterative z-score classification of cortical units into pre-call, onset, ramping, and non-responsive groups |
-| Fig. 2, Supplementary Figs. 3–4 | `Ephys Analysis/Ploting_Ephys_data.m` | Population rate vs call duration, SVM features for call occurrence, example rasters |
+| Fig. 2, Supplementary Figs. 3–4 | `Ephys Analysis/Ploting_Ephys_data.m` | Population rate vs call duration; Gaussian-kernel SVM (`fitcsvm`) predicting call occurrence from the 100–250 ms post-offset window; example rasters |
 | Fig. 2D / mixed-model R² | `Ephys Analysis/Mixed_model_correlation_lenght_firing_rate.m` | Linear mixed-effects models (`rate ~ CallLength + (1\|Ds)`) per cell type |
 | Fig. 3, Supplementary Fig. 5 | — | GraphPad Prism; see Supplementary Data 1 |
 | Fig. 4, Supplementary Fig. 6 | `Behavior Analysis/Behavior_Analysis_main_figure.m` | Paired noise vs baseline call trains; Spearman correlations of duration, frequency, and amplitude with noise level (0 to −40 dB) |
@@ -154,6 +196,7 @@ Details are in the paper. In brief:
 - Neuropixels 1.0/2.0 in auditory cortex; spikes sorted with Kilosort 2.0 and curated in Phy.
 - Calls detected with [DeepSqueak](https://github.com/DrCoffey/DeepSqueak) v3.
 - Playback of the animal’s own calls compared with self-generated calls; white noise delivered in-ear at 0, −10, −20, −30, and −40 dB relative to 75 dB.
+- Call occurrence predicted with a Gaussian-kernel SVM (`fitcsvm`); rate–duration relationships fit with mixed-effects models (`fitlme`).
 
 ## Citation
 
